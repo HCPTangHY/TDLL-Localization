@@ -1,0 +1,77 @@
+name: Build Translation Pack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'config.json'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      skip_pz_trigger:
+        description: 'Skip triggering PZ build (use latest artifact)'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Clone upstream source
+        run: |
+          git clone --depth 1 https://gitgud.io/ayumu98/the-demon-lords-lover-translations.git upstream
+          SOURCE_VER=$(jq -r '.source_version' config.json)
+          echo "SOURCE_DIR=upstream/${SOURCE_VER}/source" >> $GITHUB_ENV
+
+      - name: Fetch translations from ParaTranz
+        env:
+          PZ_TOKEN: ${{ secrets.PZ_TOKEN }}
+        run: |
+          PROJECT_ID=$(jq -r '.pz_project_id' config.json)
+          EXTRA_ARGS=""
+          if [ "${{ inputs.skip_pz_trigger }}" = "true" ]; then
+            EXTRA_ARGS="--no-trigger"
+          fi
+          python3 scripts/fetch_pz.py --project-id "$PROJECT_ID" --out pz_export $EXTRA_ARGS
+
+      - name: Build pack
+        run: |
+          python3 scripts/build_pack.py \
+            --pz-dir pz_export \
+            --source "$SOURCE_DIR" \
+            --config config.json \
+            --out build
+
+      - name: Validate pack
+        run: |
+          if [ -f upstream/tools/validate_pack.py ]; then
+            PACK_CODE=$(jq -r '.pack_code' config.json)
+            SOURCE_VER=$(jq -r '.source_version' config.json)
+            # Copy built pack to upstream tree for validator
+            cp -r "build/$PACK_CODE" "upstream/${SOURCE_VER}/$PACK_CODE"
+            python3 upstream/tools/validate_pack.py "upstream/${SOURCE_VER}/$PACK_CODE" || true
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: translation-pack
+          path: build/*.zip
+
+      - name: Create release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*.zip
+          generate_release_notes: true
