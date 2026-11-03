@@ -37,13 +37,13 @@ jobs:
       - name: Fetch translations from ParaTranz
         env:
           PZ_TOKEN: ${{ secrets.PZ_TOKEN }}
+          PZ_PROJECT_ID: ${{ secrets.PZ_PROJECT_ID }}
         run: |
-          PROJECT_ID=$(jq -r '.pz_project_id' config.json)
           EXTRA_ARGS=""
           if [ "${{ inputs.skip_pz_trigger }}" = "true" ]; then
             EXTRA_ARGS="--no-trigger"
           fi
-          python3 scripts/fetch_pz.py --project-id "$PROJECT_ID" --out pz_export $EXTRA_ARGS
+          python3 scripts/fetch_pz.py --out pz_export $EXTRA_ARGS
 
       - name: Build pack
         run: |
@@ -58,7 +58,6 @@ jobs:
           if [ -f upstream/tools/validate_pack.py ]; then
             PACK_CODE=$(jq -r '.pack_code' config.json)
             SOURCE_VER=$(jq -r '.source_version' config.json)
-            # Copy built pack to upstream tree for validator
             cp -r "build/$PACK_CODE" "upstream/${SOURCE_VER}/$PACK_CODE"
             python3 upstream/tools/validate_pack.py "upstream/${SOURCE_VER}/$PACK_CODE" || true
           fi

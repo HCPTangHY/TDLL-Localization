@@ -2,9 +2,11 @@
 """Download translation files from ParaTranz.
 
 Usage:
-    PZ_TOKEN=xxx python3 scripts/fetch_pz.py --project-id 12345 --out pz_export/
+    PZ_TOKEN=xxx PZ_PROJECT_ID=12345 python3 scripts/fetch_pz.py [--out pz_export/] [--no-trigger]
 
-Requires the PZ_TOKEN environment variable (ParaTranz API token).
+Environment variables:
+    PZ_TOKEN       - ParaTranz API token (required)
+    PZ_PROJECT_ID  - ParaTranz project ID (required)
 """
 import argparse
 import json
@@ -38,7 +40,6 @@ def trigger_export(project_id, token):
     """Trigger artifact build on PZ."""
     print("Triggering PZ artifact build...")
     api_request("/projects/{}/artifacts".format(project_id), token, method="POST")
-    # Wait for build
     for i in range(30):
         time.sleep(5)
         print("  waiting... ({}s)".format((i + 1) * 5))
@@ -60,7 +61,6 @@ def download_artifact(project_id, token):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch translations from ParaTranz")
-    parser.add_argument("--project-id", type=int, required=True)
     parser.add_argument("--out", default="pz_export", help="Output directory")
     parser.add_argument("--no-trigger", action="store_true",
                         help="Skip triggering build, just download latest")
@@ -71,17 +71,21 @@ def main():
         print("Error: PZ_TOKEN environment variable required", file=sys.stderr)
         sys.exit(1)
 
-    if not args.no_trigger:
-        trigger_export(args.project_id, token)
+    project_id = os.environ.get("PZ_PROJECT_ID")
+    if not project_id:
+        print("Error: PZ_PROJECT_ID environment variable required", file=sys.stderr)
+        sys.exit(1)
 
-    data = download_artifact(args.project_id, token)
+    if not args.no_trigger:
+        trigger_export(project_id, token)
+
+    data = download_artifact(project_id, token)
     print("  downloaded {} KB".format(len(data) // 1024))
 
     out = Path(args.out)
     if out.exists():
         shutil.rmtree(out)
 
-    # PZ artifact is a zip; may have a wrapper folder
     with zipfile.ZipFile(BytesIO(data)) as zf:
         names = zf.namelist()
         prefix = ""

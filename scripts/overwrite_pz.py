@@ -2,10 +2,11 @@
 """Overwrite existing files on ParaTranz project with latest PZ-format JSONs.
 
 Usage:
-    PZ_TOKEN=xxx python3 scripts/overwrite_pz.py <pz_dir> [version_prefix]
+    PZ_TOKEN=xxx PZ_PROJECT_ID=12345 python3 scripts/overwrite_pz.py <pz_dir> [version_prefix]
 
-Compares local files against remote, updates existing (POST /files/{id})
-and creates new ones.
+Environment variables:
+    PZ_TOKEN       - ParaTranz API token (required)
+    PZ_PROJECT_ID  - ParaTranz project ID (required)
 """
 import os, sys, json, time, glob, uuid
 import urllib.request, urllib.error
@@ -50,8 +51,12 @@ def main():
         print('Error: PZ_TOKEN environment variable required', file=sys.stderr)
         sys.exit(1)
 
+    project_id = os.environ.get('PZ_PROJECT_ID')
+    if not project_id:
+        print('Error: PZ_PROJECT_ID environment variable required', file=sys.stderr)
+        sys.exit(1)
+
     config = load_config()
-    project_id = config['pz_project_id']
     base = 'https://paratranz.cn/api'
 
     pz_dir = sys.argv[1] if len(sys.argv) > 1 else 'pz_export'

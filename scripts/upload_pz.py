@@ -2,10 +2,11 @@
 """Upload PZ-format JSONs to a ParaTranz project.
 
 Usage:
-    PZ_TOKEN=xxx python3 scripts/upload_pz.py <pz_dir> [version_prefix]
+    PZ_TOKEN=xxx PZ_PROJECT_ID=12345 python3 scripts/upload_pz.py <pz_dir> [version_prefix]
 
-Uploads all .json files under pz_dir to the PZ project configured in
-config.json, preserving folder structure via the multipart 'path' field.
+Environment variables:
+    PZ_TOKEN       - ParaTranz API token (required)
+    PZ_PROJECT_ID  - ParaTranz project ID (required)
 """
 import os, sys, json, time, glob, uuid
 import urllib.request, urllib.error
@@ -81,7 +82,12 @@ if __name__ == '__main__':
         print('Error: PZ_TOKEN environment variable required', file=sys.stderr)
         sys.exit(1)
 
+    project_id = os.environ.get('PZ_PROJECT_ID')
+    if not project_id:
+        print('Error: PZ_PROJECT_ID environment variable required', file=sys.stderr)
+        sys.exit(1)
+
     config = load_config()
     pz_dir = sys.argv[1] if len(sys.argv) > 1 else 'pz_export'
     ver = sys.argv[2] if len(sys.argv) > 2 else config.get('source_version', '0.18')
-    upload(pz_dir, ver, config['pz_project_id'], token)
+    upload(pz_dir, ver, project_id, token)
