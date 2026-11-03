@@ -20,7 +20,7 @@ _NAME_RE         = re.compile(r'^(\s*)\[name\]\s+(.+)$')
 _BLOCKER_RE      = re.compile(r'^(\s*)\[blocker\s+[^\]]*?\]\s+(.+)$')
 _SPEAKER_RE      = re.compile(r'^(\s*)([a-z][a-z0-9_]*):\s(.*)$')
 _HINT_FLAVOR_RE  = re.compile(r'^(\s*)(hint|flavor):\s(.*)$')
-_TRANSLATE_RE    = re.compile(r'\[TRANSLATE(?:[^\]]*)]\s*')
+_TRANSLATE_RE    = re.compile(r'\[TRANSLATE(?:[^\]]*)\]\s*')
 _COMMENT_RE      = re.compile(r'^\s*#\s*translator-note:')
 GRAMMAR_SKIP_KEYS = frozenset({'gender'})
 
@@ -234,7 +234,7 @@ def rebuild_scene(source_text, translations):
     return ''.join(parts)
 
 
-# ── JSON (unchanged) ──────────────────────────────────────────────────────
+# ── JSON ──────────────────────────────────────────────────────────────────
 
 def flatten_json(data, raw_text, skip_keys=frozenset()):
     # type: (dict, str, frozenset) -> list
@@ -269,17 +269,67 @@ def flatten_json(data, raw_text, skip_keys=frozenset()):
     return entries
 
 
+def _resolve_dotted_path(d, parts):
+    # type: (dict, list) -> tuple
+    """Resolve a dotted key path against a dict that may have dotted keys.
+
+    grammar.json has keys like nouns["items.armor.cloak"]["base"].
+    PZ flattens this to "nouns.items.armor.cloak.base".
+    Naive split('.') gives ['nouns','items','armor','cloak','base'] which
+    fails because 'items' is not a key in nouns — 'items.armor.cloak' is.
+
+    Strategy: greedy — try longest matching prefix at each level.
+    Returns (parent_dict, final_key) or raises KeyError.
+    """
+    if not parts:
+        raise KeyError('empty path')
+
+    # Try to walk, at each step try joining remaining segments
+    # to find a dict key that contains dots.
+    i = 0
+    while i < len(parts) - 1:
+        # Try single segment first (most common)
+        if parts[i] in d and isinstance(d[parts[i]], dict):
+            d = d[parts[i]]
+            i += 1
+            continue
+
+        # Try joining segments: parts[i], parts[i..i+1], parts[i..i+2], ...
+        found = False
+        for j in range(len(parts) - 1, i, -1):  # greedy: longest first
+            candidate = '.'.join(parts[i:j])
+            if candidate in d and isinstance(d[candidate], dict):
+                d = d[candidate]
+                i = j
+                found = True
+                break
+
+        if not found:
+            raise KeyError('.'.join(parts[i:]))
+
+    # Final key — also might need joining
+    final_key = parts[-1]
+    if final_key in d:
+        return d, final_key
+
+    # Try joining remaining
+    # (shouldn't normally happen for leaf values, but just in case)
+    raise KeyError(final_key)
+
+
 def apply_json_translations(source, translations):
     # type: (dict, dict) -> dict
+    """Apply PZ translations to a nested JSON structure.
+
+    Handles dict keys that contain dots (e.g. grammar.json nouns).
+    """
     result = copy.deepcopy(source)
     for dotted, text in translations.items():
         parts = dotted.split('.')
-        d = result
         try:
-            for p in parts[:-1]:
-                d = d[p]
-            if parts[-1] in d and isinstance(d[parts[-1]], str):
-                d[parts[-1]] = text
+            d, final_key = _resolve_dotted_path(result, parts)
+            if isinstance(d.get(final_key), str):
+                d[final_key] = text
         except (KeyError, TypeError):
             pass
     return result
