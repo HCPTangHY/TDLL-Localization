@@ -16,214 +16,163 @@ The output zip can be imported directly in-game via Settings -> Translations.
 import argparse
 import json
 import os
-import re
 import sys
 import zipfile
 from pathlib import Path
 
+# Allow importing parse.py from the same directory
+scripts_dir = os.path.dirname(os.path.abspath(__file__))
+if scripts_dir not in sys.path:
+    sys.path.insert(0, scripts_dir)
 
-def load_pz_file(path):
+from parse import (
+    parse_scene, rebuild_scene,
+    flatten_json, apply_json_translations,
+    GRAMMAR_SKIP_KEYS,
+)
+
+
+def load_pz_translations(path):
+    """Load a PZ JSON file and return {key: translation} for non-empty entries."""
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        entries = json.load(f)
+    return {
+        e["key"]: e["translation"]
+        for e in entries
+        if e.get("translation", "").strip()
+    }
 
 
-def load_all_pz(pz_dir):
-    """Load all PZ JSON files into {relative_path: {key: translation}}."""
-    result = {}
-    for root, _, files in os.walk(pz_dir):
-        for fn in files:
-            if not fn.endswith(".json"):
-                continue
-            fp = Path(root) / fn
-            rel = fp.relative_to(pz_dir).as_posix()
-            entries = load_pz_file(fp)
-            translations = {}
-            for e in entries:
-                t = e.get("translation", "").strip()
-                if t:
-                    translations[e["key"]] = t
-            result[rel] = translations
-    return result
+def find_pz_root(pz_dir):
+    """Auto-detect version prefix in PZ artifact.
 
-
-# ---------------------------------------------------------------------------
-# strings.json  (nested dict in source, PZ flat list)
-# ---------------------------------------------------------------------------
-
-def flatten_nested(d, prefix=""):
-    """Flatten nested dict to {dotted.key: value}."""
-    items = {}
-    for k, v in d.items():
-        key = "{}.{}".format(prefix, k) if prefix else k
-        if isinstance(v, dict):
-            items.update(flatten_nested(v, key))
-        else:
-            items[key] = v
-    return items
-
-
-def unflatten(flat):
-    """Unflatten {dotted.key: value} back to nested dict."""
-    root = {}
-    for dotted_key, value in flat.items():
-        parts = dotted_key.split(".")
-        d = root
-        for p in parts[:-1]:
-            if p not in d:
-                d[p] = {}
-            d = d[p]
-        d[parts[-1]] = value
-    return root
-
-
-def build_strings(pz_data, source):
-    """Build translated strings.json from PZ translations + English source."""
-    flat_source = flatten_nested(source)
-    flat_out = {}
-    for key, eng_val in flat_source.items():
-        translated = pz_data.get(key, "")
-        flat_out[key] = translated if translated else eng_val
-    return unflatten(flat_out)
-
-
-# ---------------------------------------------------------------------------
-# grammar.json  (structured in source, PZ flat list)
-# ---------------------------------------------------------------------------
-
-def build_grammar(pz_data, source):
-    """Build translated grammar.json."""
-    out = {}
-
-    # genders section
-    if "genders" in source:
-        out_genders = {}
-        for gender_name, gender_forms in source["genders"].items():
-            out_gender = {}
-            for form, eng_val in gender_forms.items():
-                pz_key = "genders.{}.{}".format(gender_name, form)
-                translated = pz_data.get(pz_key, "")
-                out_gender[form] = translated if translated else eng_val
-            out_genders[gender_name] = out_gender
-        out["genders"] = out_genders
-
-    # nouns section
-    if "nouns" in source:
-        out_nouns = {}
-        for noun_key, noun_data in source["nouns"].items():
-            out_noun = {}
-            for field, eng_val in noun_data.items():
-                if isinstance(eng_val, str):
-                    pz_key = "nouns.{}.{}".format(noun_key, field)
-                    translated = pz_data.get(pz_key, "")
-                    out_noun[field] = translated if translated else eng_val
-                else:
-                    # bool/int fields like plural, second_person
-                    out_noun[field] = eng_val
-            out_nouns[noun_key] = out_noun
-        out["nouns"] = out_nouns
-
-    # separators
-    if "separators" in source:
-        out_sep = {}
-        for k, v in source["separators"].items():
-            pz_key = "separators.{}".format(k)
-            translated = pz_data.get(pz_key, "")
-            out_sep[k] = translated if translated else v
-        out["separators"] = out_sep
-
-    return out
-
-
-# ---------------------------------------------------------------------------
-# scenes  (.scene files, PZ flat list per scene)
-# ---------------------------------------------------------------------------
-
-def parse_scene_translatable(text):
-    """Parse a .scene file and extract translatable lines.
-
-    Returns [(line_idx, indent, prefix, text), ...]
+    PZ uploads use a version prefix (e.g. '0.18/'), so the artifact
+    structure is pz_dir/0.18/strings.json. We detect and return the
+    actual root containing strings.json and scenes/.
     """
-    results = []
-    for i, line in enumerate(text.split("\n")):
-        stripped = line.lstrip()
-        indent = line[: len(line) - len(stripped)]
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            continue
-        if stripped.startswith("["):
-            if stripped.startswith("[name] "):
-                results.append((i, indent, "[name] ", stripped[7:]))
-            elif stripped.startswith("[blocker "):
-                try:
-                    bracket_end = stripped.index("]")
-                    reason = stripped[bracket_end + 2:] if len(stripped) > bracket_end + 2 else ""
-                    if reason:
-                        bracket_part = stripped[:bracket_end + 1]
-                        results.append((i, indent, bracket_part + " ", reason))
-                except ValueError:
-                    pass
-            continue
+    pz_dir = Path(pz_dir)
 
-        # hint: / flavor: lines
-        handled = False
-        for tag in ("hint:", "flavor:"):
-            if stripped.startswith(tag):
-                rest = stripped[len(tag):]
-                results.append((i, indent, tag, rest.lstrip() if rest else ""))
-                handled = True
-                break
-        if handled:
-            continue
+    # Direct structure: pz_dir/strings.json
+    if (pz_dir / "strings.json").exists():
+        return pz_dir
 
-        # Speaker prefix
-        m = re.match(r"^([a-zA-Z_]\w{0,15}:\s)", stripped)
-        if m:
-            results.append((i, indent, m.group(0), stripped[len(m.group(0)):]))
-        else:
-            # Plain narration / menu option
-            results.append((i, indent, "", stripped))
-    return results
+    # Version-prefixed: pz_dir/0.18/strings.json
+    for child in sorted(pz_dir.iterdir()):
+        if child.is_dir() and (child / "strings.json").exists():
+            print("  detected PZ version prefix: {}/".format(child.name))
+            return child
 
+    # Deeper nesting: pz_dir/utf8/0.18/strings.json (PZ artifact quirk)
+    for root, dirs, files in os.walk(pz_dir):
+        if "strings.json" in files:
+            found = Path(root)
+            print("  detected PZ root at: {}".format(found.relative_to(pz_dir)))
+            return found
 
-def build_scene(pz_entries, source_text):
-    """Rebuild a .scene file with translations injected."""
-    lines = source_text.split("\n")
-    translatable = parse_scene_translatable(source_text)
-
-    if len(translatable) != len(pz_entries):
-        # Mismatch -- return source unchanged (will play in English)
-        print("    WARNING: PZ entry count mismatch ({} vs {}), skipping".format(
-            len(translatable), len(pz_entries)), file=sys.stderr)
-        return source_text
-
-    for (line_idx, indent, prefix, _eng_text), pz_entry in zip(translatable, pz_entries):
-        translated = pz_entry.get("translation", "").strip()
-        if translated:
-            lines[line_idx] = indent + prefix + translated
-
-    return "\n".join(lines)
+    print("  WARNING: could not find strings.json in PZ directory", file=sys.stderr)
+    return pz_dir
 
 
 # ---------------------------------------------------------------------------
-# Coverage stats
+# strings.json
 # ---------------------------------------------------------------------------
 
-def compute_coverage(pz_dir):
+def build_strings(pz_translations, source_path, out_path):
+    """Build translated strings.json using PZ translations + English source."""
+    with open(source_path, encoding="utf-8") as f:
+        source = json.load(f)
+
+    result = apply_json_translations(source, pz_translations)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    return len(pz_translations)
+
+
+# ---------------------------------------------------------------------------
+# grammar.json
+# ---------------------------------------------------------------------------
+
+def build_grammar(pz_translations, source_path, out_path):
+    """Build translated grammar.json using PZ translations + English source."""
+    with open(source_path, encoding="utf-8") as f:
+        source = json.load(f)
+
+    result = apply_json_translations(source, pz_translations)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    return len(pz_translations)
+
+
+# ---------------------------------------------------------------------------
+# scenes — POS-based rebuild via parse.py
+# ---------------------------------------------------------------------------
+
+def build_scenes(pz_scenes_dir, source_scenes_dir, out_scenes_dir):
+    """Rebuild all .scene files using POS-based splicing from parse.py."""
+    pz_scenes_dir = Path(pz_scenes_dir)
+    source_scenes_dir = Path(source_scenes_dir)
+    out_scenes_dir = Path(out_scenes_dir)
+
+    if not pz_scenes_dir.exists():
+        print("  WARNING: no scenes/ in PZ export", file=sys.stderr)
+        return 0, 0
+
+    scene_count = 0
+    translated_count = 0
+
+    for pz_json in sorted(pz_scenes_dir.rglob("*.json")):
+        rel_json = pz_json.relative_to(pz_scenes_dir)
+        scene_rel = str(rel_json).replace(".json", ".scene")
+        src_scene = source_scenes_dir / scene_rel
+
+        if not src_scene.exists():
+            continue
+
+        # Load PZ translations
+        translations = load_pz_translations(pz_json)
+
+        # Read English source scene
+        source_text = src_scene.read_text("utf-8")
+
+        # POS-based rebuild
+        translated_text = rebuild_scene(source_text, translations)
+
+        # Write output
+        out_scene = out_scenes_dir / scene_rel
+        out_scene.parent.mkdir(parents=True, exist_ok=True)
+        out_scene.write_text(translated_text, "utf-8")
+
+        scene_count += 1
+        if translations:
+            translated_count += 1
+
+    return scene_count, translated_count
+
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+
+def compute_coverage(pz_root):
+    """Count total and translated entries across all PZ JSONs."""
     total = 0
     translated = 0
-    for root, _, files in os.walk(pz_dir):
+    for root, _, files in os.walk(pz_root):
         for fn in files:
             if not fn.endswith(".json"):
                 continue
-            fp = Path(root) / fn
-            entries = load_pz_file(fp)
-            file_total = len(entries)
-            file_translated = sum(1 for e in entries if e.get("translation", "").strip())
-            total += file_total
-            translated += file_translated
+            with open(os.path.join(root, fn), encoding="utf-8") as f:
+                entries = json.load(f)
+            total += len(entries)
+            translated += sum(1 for e in entries if e.get("translation", "").strip())
     pct = round(translated / total * 100, 1) if total else 0
-    return {"total": total, "translated": translated, "percent": pct}
+    return total, translated, pct
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +184,8 @@ def build_pack(pz_dir, source_dir, config, out_dir):
     pack_dir = out_dir / pack_code
     pack_dir.mkdir(parents=True, exist_ok=True)
 
-    pz_all = load_all_pz(pz_dir)
+    # Auto-detect version prefix in PZ artifact
+    pz_root = find_pz_root(pz_dir)
 
     # --- manifest.json ---
     manifest = {
@@ -250,59 +200,34 @@ def build_pack(pz_dir, source_dir, config, out_dir):
         f.write("\n")
 
     # --- strings.json ---
-    pz_strings = pz_all.get("strings.json", {})
-    with open(source_dir / "strings.json", encoding="utf-8") as f:
-        source_strings = json.load(f)
-    translated_strings = build_strings(pz_strings, source_strings)
-    with open(pack_dir / "strings.json", "w", encoding="utf-8") as f:
-        json.dump(translated_strings, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    print("  strings.json: {} translated entries".format(len(pz_strings)))
+    pz_strings_path = pz_root / "strings.json"
+    if pz_strings_path.exists():
+        pz_strings = load_pz_translations(pz_strings_path)
+        n = build_strings(pz_strings, source_dir / "strings.json", pack_dir / "strings.json")
+        print("  strings.json: {} translated entries".format(n))
+    else:
+        print("  WARNING: strings.json not found in PZ export", file=sys.stderr)
 
     # --- grammar.json ---
-    pz_grammar = pz_all.get("grammar.json", {})
-    with open(source_dir / "grammar.json", encoding="utf-8") as f:
-        source_grammar = json.load(f)
-    translated_grammar = build_grammar(pz_grammar, source_grammar)
-    with open(pack_dir / "grammar.json", "w", encoding="utf-8") as f:
-        json.dump(translated_grammar, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    print("  grammar.json: {} translated entries".format(len(pz_grammar)))
+    pz_grammar_path = pz_root / "grammar.json"
+    if pz_grammar_path.exists():
+        pz_grammar = load_pz_translations(pz_grammar_path)
+        n = build_grammar(pz_grammar, source_dir / "grammar.json", pack_dir / "grammar.json")
+        print("  grammar.json: {} translated entries".format(n))
+    else:
+        print("  WARNING: grammar.json not found in PZ export", file=sys.stderr)
 
     # --- scenes ---
-    scene_count = 0
-    translated_scene_count = 0
-    for pz_rel in pz_all:
-        if not pz_rel.startswith("scenes/"):
-            continue
-        scene_rel = pz_rel.replace(".json", ".scene")
-        source_scene = source_dir / scene_rel
-        if not source_scene.exists():
-            continue
-
-        pz_path = pz_dir / pz_rel
-        pz_entries = load_pz_file(pz_path)
-
-        with open(source_scene, encoding="utf-8") as f:
-            source_text = f.read()
-
-        translated_text = build_scene(pz_entries, source_text)
-        out_scene = pack_dir / scene_rel
-        out_scene.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_scene, "w", encoding="utf-8", newline="\n") as f:
-            f.write(translated_text)
-
-        scene_count += 1
-        has_translation = any(e.get("translation", "").strip() for e in pz_entries)
-        if has_translation:
-            translated_scene_count += 1
-
-    print("  scenes: {} total, {} with translations".format(scene_count, translated_scene_count))
+    scene_total, scene_translated = build_scenes(
+        pz_root / "scenes",
+        source_dir / "scenes",
+        pack_dir / "scenes",
+    )
+    print("  scenes: {} total, {} with translations".format(scene_total, scene_translated))
 
     # --- coverage ---
-    coverage = compute_coverage(pz_dir)
-    print("  coverage: {}/{} ({}%)".format(
-        coverage["translated"], coverage["total"], coverage["percent"]))
+    total, translated, pct = compute_coverage(pz_root)
+    print("  coverage: {}/{} ({}%)".format(translated, total, pct))
 
     # --- zip ---
     zip_path = out_dir / "{}.zip".format(pack_code)
